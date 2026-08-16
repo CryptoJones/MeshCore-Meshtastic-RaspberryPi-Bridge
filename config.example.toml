@@ -1,0 +1,41 @@
+# Copy to config.toml and edit. config.toml is gitignored — keep keys/passwords out of git.
+
+[meshcore]
+port = "/dev/serial/by-id/usb-Seeed_Wio_Tracker_L1-if00"  # your MeshCore companion node
+baud = 115200
+channel = 0            # channel index to bridge (0 = the public channel)
+
+[meshtastic]
+port = "/dev/serial/by-id/usb-...Meshtastic..."           # your Meshtastic node
+channel = 0            # channel index to bridge
+
+[bridge]
+# Which way messages flow. "both" = full two-way relay.
+direction = "both"     # both | meshcore_to_meshtastic | meshtastic_to_meshcore
+# Prefix added to relayed messages so recipients know it came from the other mesh.
+meshcore_prefix = "[MT] "     # shown on the MeshCore side for messages from Meshtastic
+meshtastic_prefix = "[MC] "   # shown on the Meshtastic side for messages from MeshCore
+# Drop a relayed message if we've seen the same (text, sender) within this many seconds.
+# Loop / echo protection.
+dedup_window_seconds = 30
+# Messages starting with this prefix are treated as commands TO the bridge
+# (it replies to the asker on their own mesh) instead of being relayed.
+command_prefix = "!bridge"
+
+[commands]
+# Commands are privileged: the bridge only obeys them from authenticated senders.
+# A shared-channel message has NO verified sender, so commands must arrive as a
+# DIRECT MESSAGE (which carries the sender's public key), and only from a key on
+# these allow-lists. Everyone else's command is ignored.
+require_direct_message = true
+# MeshCore: authorized sender public keys (hex). Find a node's key in its contact
+# card / advert. On MeshCore a DM is end-to-end encrypted to the bridge, so these
+# keys are cryptographically authenticated.
+authorized_meshcore_keys = [
+    # "2baff46f375934f5f1a7c1619194fbd98d20d29cfbc19ad43aa64a6560c482a0",
+]
+# Meshtastic: authorized node IDs (e.g. "!a1b2c3d4"). Use PKC (public-key) direct
+# messages — firmware 2.5+ — or the node id is spoofable.
+authorized_meshtastic_ids = [
+    # "!a1b2c3d4",
+]
