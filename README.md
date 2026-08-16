@@ -18,20 +18,24 @@ existing relays don't have: **authenticated, per-user command and control.**
 
 ## Background — built for the Minden, Nebraska MeshCore pilot
 
-This grew out of a real project: a solar-powered **MeshCore** emergency-comms
-relay proposed for a City of Minden, Nebraska tornado-siren pole
+This grew out of a real project: a solar-powered **MeshCore** relay proposed for
+a City of Minden, Nebraska tornado-siren pole
 ([Minden-MeshCore-Pilot](https://github.com/CryptoJones/Minden-MeshCore-Pilot)).
-That pilot has to prove itself over a fixed term with **measured data** — uptime,
-battery through the season, traffic, and above all whether the relay is reachable
-— gathered **without climbing the pole**.
+The **point of that pilot is off-grid community messaging** — a town that can
+talk to itself independent of the cell network and internet. Emergency and
+disaster resilience is one compelling benefit (and the wedge for pitching a
+city), but the mission is everyday carrier-free communication for the community.
 
-The **authenticated command interface** is what solves that data-collection
-problem cleanly. An authorized node at home queries the rooftop repeater over the
-mesh (`!bridge status`, uptime, packet counts) and logs the answers, so the
-pilot's evaluation data collects itself — hands-off, no second roof install, and
-**only authorized users** can issue those commands. The MeshCore↔Meshtastic
-bridging came along because the same Pi can host a node of each; the command
-layer is the piece the pilot actually needed.
+To earn permanence, the pilot has to prove itself over a fixed term with
+**measured data** — uptime, battery through the season, traffic, and above all
+whether the relay is reachable — gathered **without climbing the pole**. The
+**authenticated command interface** solves that: an authorized node queries the
+rooftop repeater over the mesh (`!bridge status`, uptime, packet counts) and
+logs the answers, so the pilot's evaluation data collects itself — hands-off, no
+second roof install, and only authorized users can issue those commands. The
+MeshCore↔Meshtastic bridging came along because the same Pi can host a node of
+each and the two mesh communities shouldn't be siloed. See
+[DESIGN.md](DESIGN.md) for the full rationale and roadmap.
 
 ```
    MeshCore mesh                          Meshtastic mesh
