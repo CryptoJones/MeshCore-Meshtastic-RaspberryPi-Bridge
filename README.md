@@ -1,12 +1,15 @@
 # MeshCore ⇄ Meshtastic Raspberry Pi Bridge
 
-A small Raspberry Pi service that relays text messages between a **MeshCore**
-mesh and a **Meshtastic** mesh.
+A small Raspberry Pi service that bridges a **MeshCore** mesh and a **Meshtastic**
+mesh — with an **authenticated command interface** as its headline feature: you
+can query and control the bridge from either network, and it only obeys
+allow-listed senders over a direct message.
 
-MeshCore and Meshtastic both use LoRa in the same band, but they speak different
-protocols and **do not talk to each other over the air**. The only place the two
-networks can meet is a host that runs one node of each and passes messages
-across in software. This is that host.
+MeshCore and Meshtastic both use LoRa in the same band but speak different
+protocols and **do not talk to each other over the air**. A host running one node
+of each can pass messages across in software. Relaying between the two is
+[already solved](#prior-art) — what this project focuses on is the piece the
+existing relays don't have: **authenticated, per-user command and control.**
 
 ```
    MeshCore mesh                          Meshtastic mesh
@@ -22,6 +25,24 @@ across in software. This is that host.
                     │     bridge.py     │
                     └───────────────────┘
 ```
+
+## Prior art
+
+Plain message relaying between MeshCore and Meshtastic is a solved problem, and
+if a relay is all you need, use one of these rather than this project:
+
+- **[Akita-Meshtastic-Meshcore-Bridge](https://github.com/AkitaEngineering/Akita-Meshtastic-Meshcore-Bridge)**
+  (Python, GPLv3) — a mature bidirectional bridge with MQTT, robust reconnection,
+  rate limiting, TLS, a terminal dashboard, and a REST monitoring API.
+- **[meshnard's MT↔MC relay](https://meshnard.com/mesh/mt-mc_relay)** — a simple
+  public-channel relay with a message prefix and loop prevention.
+
+**What this project adds** that those don't: an **authenticated command
+interface** (below) — the bridge is addressable from either mesh, obeys commands
+only from allow-listed senders over a direct message, and replies privately to
+the requester. If you want a controllable bridge, not just a pipe, that is the
+reason this exists. The relay itself here is deliberately minimal; for a
+heavy-duty relay with MQTT/dashboards, prefer Akita.
 
 ## Hardware
 
@@ -119,16 +140,29 @@ allow-list, so only nodes whose keys you have added can command the bridge.
 
 ## Status
 
-**Scaffold.** The architecture, config, dedup/loop-prevention, and both
-connection paths are in place. Two `# TODO(hardware)` spots in `bridge.py` — the
-exact inbound-event subscription on each side — need a real MeshCore node and a
-real Meshtastic node on the same Pi to finish and verify, because the precise
-event/packet field names vary by library version. Contributions welcome.
+**Scaffold.** The command interface + authentication model, config, minimal
+relay, and dedup/loop-prevention are in place. Two `# TODO(hardware)` spots in
+`bridge.py` — the exact inbound-event subscription on each side — need a real
+MeshCore node and a real Meshtastic node on the same Pi to finish and verify,
+since the precise event/packet field names vary by library version. The
+authenticated command control is the novel part and the priority; the relay is
+intentionally thin (see [Prior art](#prior-art)). Contributions welcome.
 
 ## Security
 
 Keep channel keys and admin passwords out of git. `config.toml` is gitignored;
 only `config.example.toml` (with placeholders) is tracked.
+
+## Acknowledgements
+
+This project stands on prior art. It does **not** reuse their code (the relay
+here is independently written, which is why this repo can be Apache-2.0), but
+these projects solved MeshCore⇄Meshtastic relaying first and deserve the credit:
+
+- **[Akita-Meshtastic-Meshcore-Bridge](https://github.com/AkitaEngineering/Akita-Meshtastic-Meshcore-Bridge)** by Akita Engineering — the mature bidirectional bridge (MQTT, dashboard, REST API).
+- **[meshnard's MT↔MC relay](https://meshnard.com/mesh/mt-mc_relay)** — the simple public-channel relay with prefix + loop prevention.
+
+If you build on this, please keep these acknowledgements intact.
 
 ## License
 
