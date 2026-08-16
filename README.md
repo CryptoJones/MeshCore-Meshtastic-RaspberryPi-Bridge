@@ -11,6 +11,28 @@ of each can pass messages across in software. Relaying between the two is
 [already solved](#prior-art) — what this project focuses on is the piece the
 existing relays don't have: **authenticated, per-user command and control.**
 
+> **Just want a simple relay?** Use
+> **[Akita Engineering's Meshtastic⇄Meshcore Bridge](https://github.com/AkitaEngineering/Akita-Meshtastic-Meshcore-Bridge)**
+> — it's a mature, full-featured relay. This project is for when you also want to
+> *command and control* the bridge from the mesh, with authenticated users.
+
+## Background — built for the Minden, Nebraska MeshCore pilot
+
+This grew out of a real project: a solar-powered **MeshCore** emergency-comms
+relay proposed for a City of Minden, Nebraska tornado-siren pole
+([Minden-MeshCore-Pilot](https://github.com/CryptoJones/Minden-MeshCore-Pilot)).
+That pilot has to prove itself over a fixed term with **measured data** — uptime,
+battery through the season, traffic, and above all whether the relay is reachable
+— gathered **without climbing the pole**.
+
+The **authenticated command interface** is what solves that data-collection
+problem cleanly. An authorized node at home queries the rooftop repeater over the
+mesh (`!bridge status`, uptime, packet counts) and logs the answers, so the
+pilot's evaluation data collects itself — hands-off, no second roof install, and
+**only authorized users** can issue those commands. The MeshCore↔Meshtastic
+bridging came along because the same Pi can host a node of each; the command
+layer is the piece the pilot actually needed.
+
 ```
    MeshCore mesh                          Meshtastic mesh
         │                                       │
@@ -161,8 +183,6 @@ these projects solved MeshCore⇄Meshtastic relaying first and deserve the credi
 
 - **[Akita-Meshtastic-Meshcore-Bridge](https://github.com/AkitaEngineering/Akita-Meshtastic-Meshcore-Bridge)** by Akita Engineering — the mature bidirectional bridge (MQTT, dashboard, REST API).
 - **[meshnard's MT↔MC relay](https://meshnard.com/mesh/mt-mc_relay)** — the simple public-channel relay with prefix + loop prevention.
-
-If you build on this, please keep these acknowledgements intact.
 
 ## License
 
