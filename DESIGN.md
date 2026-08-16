@@ -29,36 +29,30 @@ local **SQLite** database (the Pi supplies wall-clock time; the node reports
 uptime, not date). Outages are stored as `reachable=0` rows so gaps are real
 data. This makes the Pi the single source of truth for time-series.
 
-### DD-003 — LoRa is a command-and-summary channel, not a bulk data pipe
+### DD-003 — Over the air: simple summaries only
 
 A LoRa message is a few hundred bytes, rate-limited, and slow. Bulk history
-**cannot** move over the mesh. So all over-the-air history access returns
-**aggregates and downsampled series**, never raw dumps:
+**cannot** move over the mesh, and we are not going to try. Over-the-air history
+is **just a simple summary** that fits in one message — a few aggregate numbers
+over a window (e.g. average/min battery, % reachable, packet totals). No raw
+rows, no time-series, no pagination. One question, one short answer.
 
-- summarize (avg/min/max/count over a period),
-- downsample (e.g. one point per hour),
-- paginate/cap any series to fit a single message,
-- refuse/truncate oversized responses and say so.
-
-The **complete dataset is pulled off the Pi directly** (USB / SSH / a small
-local web endpoint on the home network) for reports. Mesh commands are for
-spot-checks and summaries from anywhere in radio range; the Pi is where the full
-history lives.
+The **complete dataset lives on the Pi** and is pulled off it directly (USB /
+SSH / a small local web endpoint on the home network) for the actual reports and
+charts. The mesh side is for quick "how's the pole doing?" summaries from
+anywhere in radio range; the Pi is for everything detailed.
 
 ## Roadmap
 
 - [ ] **Historian storage** — SQLite time-series; a built-in poller (or reuse the
       pilot's `poll-repeater.py`) writing timestamped rows incl. `reachable`.
-- [ ] **History query commands** (authenticated, either mesh, reply to asker):
-      - `!bridge summary <window>` — battery min/max/avg, % reachable, packet totals
+- [ ] **Summary commands** (authenticated, either mesh, reply to asker) — each a
+      single one-message summary, nothing more:
+      - `!bridge summary <window>` — battery avg/min, % reachable, packet totals
       - `!bridge uptime <window>` — availability % + outage count
-      - `!bridge battery <window>` — downsampled series (bounded points)
-      - `!bridge last <n>` — last N readings
-      - `!bridge since <time>` — readings since a time
-- [ ] **Response-size guard** — every history reply fits one LoRa message;
-      paginate with an explicit `page` arg; truncate loudly.
 - [ ] **Out-of-band bulk export** — a small local HTTP endpoint (home LAN) and/or
-      documented `scp` of the SQLite/CSV for the real pilot report.
+      documented `scp` of the SQLite/CSV for the real pilot report. All detailed
+      data lives here, not on the mesh.
 - [ ] **Finish the two `# TODO(hardware)` inbound wirings** (needs a real node of
       each) so commands and relay run on hardware.
 - [ ] **Per-node history** (Phase 2, multiple repeaters): `!bridge <metric> <node> <window>`.
