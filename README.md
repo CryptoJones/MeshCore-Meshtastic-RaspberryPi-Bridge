@@ -37,20 +37,32 @@ MeshCore↔Meshtastic bridging came along because the same Pi can host a node of
 each and the two mesh communities shouldn't be siloed. See
 [DESIGN.md](DESIGN.md) for the full rationale and roadmap.
 
+Reference deployment (DD-007) — the MeshCore side talks; the Meshtastic side only
+listens:
+
 ```
-   MeshCore mesh                          Meshtastic mesh
-        │                                       │
-   ( LoRa )                                 ( LoRa )
-        │                                       │
-  ┌─────────────┐   USB              USB  ┌─────────────┐
-  │ MeshCore    │────────┐      ┌─────────│ Meshtastic  │
-  │ companion   │        │      │         │ node        │
-  └─────────────┘        ▼      ▼         └─────────────┘
-                    ┌───────────────────┐
-                    │   Raspberry Pi    │
-                    │     bridge.py     │
-                    └───────────────────┘
+   MeshCore mesh                     Meshtastic airspace
+   (pole repeater)                   (no local population)
+         ▲                                  │
+         │ ( LoRa )  TX + RX                │ ( LoRa )  RX only
+         ▼                                  ▼
+  ┌─────────────┐                    ┌─────────────┐
+  │ MeshCore    │                    │ Meshtastic  │
+  │ companion   │                    │   observe   │
+  └──────┬──────┘                    └──────┬──────┘
+         │ USB                          USB │
+         └──────────────┐        ┌──────────┘
+                        ▼        ▼
+                 ┌───────────────────────┐
+                 │      Raspberry Pi     │
+                 │        bridge.py      │
+                 │  historian + commands │
+                 └───────────────────────┘
 ```
+
+Relaying between the two meshes is **off** in this configuration — there is no
+Meshtastic population to relay to. The code remains, and enabling it is a
+`direction` change if that ever changes.
 
 ## Prior art
 
@@ -73,12 +85,20 @@ heavy-duty relay with MQTT/dashboards, prefer Akita.
 ## Hardware
 
 - A Raspberry Pi (any model with two free USB ports; a Pi Zero 2 W is plenty —
-  the bridge is I/O-bound and mostly idle).
+  the bridge is I/O-bound and mostly idle). Mains powered.
 - One **MeshCore** node running *companion* firmware, on USB.
-- One **Meshtastic** node, on USB.
-- Two antennas with **as much physical separation as practical.** Two ~900 MHz
-  LoRa transmitters inches apart will desense each other — when one transmits it
-  swamps the other's receiver. Separate the antennas or accept reduced range.
+- One **Meshtastic** node, on USB — **receive-only** in the reference deployment
+  (see DD-007 in [DESIGN.md](DESIGN.md)).
+- **Antenna separation depends on whether both radios transmit.**
+  - *One transmitter* (the reference deployment: MeshCore companion + a
+    receive-only Meshtastic node) — there is no mutual desense. The silent node
+    cannot blind anything; it only loses the small fraction of packets that
+    arrive while the MeshCore node is transmitting. A couple of feet is fine.
+  - *Two transmitters* — two ~900 MHz transmitters inches apart will desense each
+    other badly. At 915 MHz, **~10 ft of vertical separation** buys roughly 67 dB
+    of isolation; matching that horizontally takes ~191 ft. **Stack them, never
+    side by side.** Below ~3 ft, budget for a cavity or notch filter — ceramic and
+    SAW filters do not provide enough in-band isolation.
 
 ## Setup
 
