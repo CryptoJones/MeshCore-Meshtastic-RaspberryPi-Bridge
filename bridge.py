@@ -41,10 +41,95 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import ctypes
+import os
 import sys
 import time
 import tomllib
 from dataclasses import dataclass, field
+
+# A Raspberry Pi has no battery-backed RTC either — the same premise this whole
+# feature rests on for the nRF52. After a power cut the Pi can come up at the
+# epoch, or at whatever fake-hwclock saved before shutdown, and systemd starts
+# services well before NTP has stepped the clock. Writing *that* onto the node
+# would overwrite a possibly-correct clock with a confidently-wrong one, which
+# is worse than not syncing at all. So the host clock has to earn our trust
+# before we push it.
+MIN_PLAUSIBLE_EPOCH = 1767225600   # 2026-01-01Z — older than this, the Pi has not been stepped
+MAX_PLAUSIBLE_EPOCH = 4102444800   # 2100-01-01Z — newer than this, something is wrong
+_CLOCK_CMD_TIMEOUT = 10.0          # bound each node round trip so a wedged node cannot stall us
+_STA_UNSYNC = 0x0040               # <linux/timex.h>: clock is not disciplined by NTP
+_TIMESYNCD_STAMP = "/run/systemd/timesync/synchronized"
+
+
+class _Timex(ctypes.Structure):
+    """Linux `struct timex`, for a read-only adjtimex(2) query."""
+
+    _fields_ = [
+        ("modes", ctypes.c_int), ("offset", ctypes.c_long), ("freq", ctypes.c_long),
+        ("maxerror", ctypes.c_long), ("esterror", ctypes.c_long), ("status", ctypes.c_int),
+        ("constant", ctypes.c_long), ("precision", ctypes.c_long), ("tolerance", ctypes.c_long),
+        ("time_sec", ctypes.c_long), ("time_usec", ctypes.c_long), ("tick", ctypes.c_long),
+        ("ppsfreq", ctypes.c_long), ("jitter", ctypes.c_long), ("shift", ctypes.c_int),
+        ("stabil", ctypes.c_long), ("jitcnt", ctypes.c_long), ("calcnt", ctypes.c_long),
+        ("errcnt", ctypes.c_long), ("stbcnt", ctypes.c_long), ("tai", ctypes.c_int),
+        ("padding", ctypes.c_int * 11),
+    ]
+
+
+def kernel_clock_synchronized() -> bool | None:
+    """Is an NTP source currently disciplining the system clock?
+
+    Reads the kernel's own NTP state via adjtimex(2), so it is agnostic to which
+    daemon is running — systemd-timesyncd, chrony and ntpd all set it. Returns
+    None if we cannot tell (not Linux, no libc, unexpected ABI), which callers
+    treat as "no opinion" rather than as a failure.
+    """
+    try:
+        libc = ctypes.CDLL("libc.so.6", use_errno=True)
+        buf = _Timex()
+        buf.modes = 0  # read-only
+        if libc.adjtimex(ctypes.byref(buf)) < 0:
+            return None
+        return not (buf.status & _STA_UNSYNC)
+    except Exception:
+        return None
+
+
+def host_clock_trusted(require_sync: bool = True) -> tuple[bool, str]:
+    """Decide whether the host clock is fit to write to a mesh node."""
+    now = time.time()
+    if not MIN_PLAUSIBLE_EPOCH <= now <= MAX_PLAUSIBLE_EPOCH:
+        return False, f"host clock reads {int(now)}, outside the plausible range"
+    if not require_sync:
+        return True, "plausible (sync check disabled)"
+    # systemd-timesyncd publishes this only once it has actually stepped/slewed.
+    if os.path.exists(_TIMESYNCD_STAMP):
+        return True, "timesyncd synchronized"
+    synced = kernel_clock_synchronized()
+    if synced is True:
+        return True, "kernel clock synchronized"
+    if synced is False:
+        return False, "kernel reports the clock is not NTP-disciplined"
+    return True, "plausible (no sync state available)"
+
+
+def _clamp(value, name: str, *, low: float) -> float:
+    """Coerce a config number into a sane range, complaining rather than failing.
+
+    A typo here (0, or a negative) would turn the sync loop into a tight spin on
+    the serial port the relay shares. Clamping keeps a hard-to-reach node online
+    instead of crash-looping it, and the warning says what happened.
+    """
+    try:
+        out = float(value)
+    except (TypeError, ValueError):
+        print(f"config: {name}={value!r} is not a number, using {low}", file=sys.stderr, flush=True)
+        return low
+    if out < low:
+        print(f"config: {name}={out} is below the minimum, clamping to {low}", file=sys.stderr, flush=True)
+        return low
+    return out
 
 
 @dataclass
@@ -65,6 +150,8 @@ class Config:
     mc_clock_sync: bool = True
     mc_clock_sync_interval: float = 3600.0
     mc_clock_max_skew: float = 30.0
+    mc_clock_retry: float = 30.0
+    mc_require_host_sync: bool = True
 
     @classmethod
     def load(cls, path: str) -> "Config":
@@ -83,8 +170,16 @@ class Config:
             authorized_mc_keys={k.lower() for k in c.get("commands", {}).get("authorized_meshcore_keys", [])},
             authorized_mt_ids={str(i) for i in c.get("commands", {}).get("authorized_meshtastic_ids", [])},
             mc_clock_sync=bool(c["meshcore"].get("clock_sync", True)),
-            mc_clock_sync_interval=float(c["meshcore"].get("clock_sync_interval_seconds", 3600)),
-            mc_clock_max_skew=float(c["meshcore"].get("clock_max_skew_seconds", 30)),
+            mc_clock_sync_interval=_clamp(
+                c["meshcore"].get("clock_sync_interval_seconds", 3600),
+                "clock_sync_interval_seconds", low=60.0),
+            mc_clock_max_skew=_clamp(
+                c["meshcore"].get("clock_max_skew_seconds", 30),
+                "clock_max_skew_seconds", low=0.0),
+            mc_clock_retry=_clamp(
+                c["meshcore"].get("clock_retry_seconds", 30),
+                "clock_retry_seconds", low=5.0),
+            mc_require_host_sync=bool(c["meshcore"].get("require_host_clock_sync", True)),
         )
 
     @property
@@ -123,6 +218,7 @@ class Bridge:
         self.clock_syncs = 0                       # how many times we set the node clock
         self.last_clock_sync: float | None = None  # unix epoch of the last successful set
         self._clock_task: asyncio.Task | None = None  # held so the loop is not GC'd
+        self._clock_backoff = cfg.mc_clock_retry   # grows while syncing is unhealthy
 
     # ---- Command interface (bridge is queryable from either mesh) ----
 
@@ -157,16 +253,29 @@ class Bridge:
         args = text.strip()[len(self.cfg.command_prefix):].strip().split()
         cmd = args[0].lower() if args else "help"
         if cmd in ("help", ""):
-            return "bridge commands: status | uptime | ping | help"
+            return "bridge commands: status | uptime | clock | ping | help"
         if cmd == "ping":
             return "pong"
+        if cmd == "clock":
+            return self.clock_summary()
         if cmd == "uptime":
             secs = int(time.monotonic() - self.started_at)
             return f"bridge up {secs // 3600}h {secs % 3600 // 60}m"
         if cmd == "status":
             return (f"bridge OK · direction={self.cfg.direction} · "
-                    f"MeshCore ch{self.cfg.mc_channel} · Meshtastic ch{self.cfg.mt_channel}")
+                    f"MeshCore ch{self.cfg.mc_channel} · Meshtastic ch{self.cfg.mt_channel} · "
+                    f"{self.clock_summary()}")
         return f"unknown command '{cmd}' — try: {self.cfg.command_prefix} help"
+
+    def clock_summary(self) -> str:
+        """One-line clock health, so the pilot can ask over the mesh whether the
+        node's timestamps can be trusted — the counters are useless unheard."""
+        if not self.cfg.mc_clock_sync:
+            return "clock sync off"
+        if self.last_clock_sync is None:
+            return "clock never synced"
+        mins = int(time.time() - self.last_clock_sync) // 60
+        return f"clock synced {mins}m ago ({self.clock_syncs}x)"
 
     # ---- MeshCore clock discipline ----
     #
@@ -175,8 +284,10 @@ class Bridge:
     # to the firmware build date. Anything the node timestamps after that is
     # wrong by years, which for this project means the pilot's own evaluation
     # data (uptime, traffic, when a repeater was last heard) is quietly bogus.
-    # The Pi is the only thing in the enclosure that knows the real time, so it
-    # pushes it on connect and re-checks on an interval.
+    #
+    # The Pi is better placed to know the real time, but only once NTP has
+    # stepped it — see host_clock_trusted(). Until then we deliberately do
+    # nothing, because a wrong write is worse than no write.
 
     @staticmethod
     def _epoch_from_event(ev) -> int | None:
@@ -184,58 +295,99 @@ class Bridge:
 
         The library wraps replies in an Event whose `payload` is usually a dict;
         the key name for the device time has moved between versions, so probe
-        the plausible ones rather than pin to one.
+        the plausible ones, most specific first. Every candidate is range-checked
+        so an unrelated counter cannot masquerade as a clock reading — accepting
+        a bogus value would look like "the node is fine" and silently skip the
+        write this whole feature exists to make. bool is rejected explicitly:
+        isinstance(True, int) is True in Python, so a flag would otherwise read
+        as epoch 1.
         """
         payload = getattr(ev, "payload", ev)
+        candidates = []
         if isinstance(payload, dict):
-            for key in ("time", "epoch", "curr_time", "timestamp", "secs"):
-                val = payload.get(key)
-                if isinstance(val, (int, float)) and val > 0:
-                    return int(val)
-            return None
-        if isinstance(payload, (int, float)) and payload > 0:
-            return int(payload)
+            candidates = [payload.get(k) for k in ("curr_time", "time", "epoch", "secs", "timestamp")]
+        else:
+            candidates = [payload]
+        for val in candidates:
+            if isinstance(val, bool) or not isinstance(val, (int, float)):
+                continue
+            if MIN_PLAUSIBLE_EPOCH <= val <= MAX_PLAUSIBLE_EPOCH:
+                return int(val)
         return None
 
-    async def _sync_meshcore_clock(self, *, force: bool = False) -> bool:
-        """Push host UTC to the MeshCore node. Returns True if it set the clock.
+    async def _sync_meshcore_clock(self, *, force: bool = False) -> str:
+        """Push host UTC to the MeshCore node.
 
-        Reads the node's clock first so an unnecessary write is skipped (and so
-        the drift gets logged, which is the signal that the node rebooted). If
-        the read fails we still set the clock — a node we cannot read the time
-        from is exactly the case where the time is most likely wrong.
+        Returns one of: "set" (wrote), "ok" (node already close enough),
+        "failed", "untrusted-host", "no-client" — the caller uses this to decide
+        how soon to look again.
         """
         if self.mc is None:
-            return False
-        now = int(time.time())
+            return "no-client"
+
+        trusted, why = host_clock_trusted(self.cfg.mc_require_host_sync)
+        if not trusted:
+            # Deliberately do nothing: see the note above. We will be back soon.
+            print(f"clock: not syncing — {why}", file=sys.stderr, flush=True)
+            return "untrusted-host"
+
         node_epoch = None
         try:
-            node_epoch = self._epoch_from_event(await self.mc.commands.get_time())
+            ev = await asyncio.wait_for(self.mc.commands.get_time(), _CLOCK_CMD_TIMEOUT)
+            node_epoch = self._epoch_from_event(ev)
+        except asyncio.TimeoutError:
+            print("clock: timed out reading node time", file=sys.stderr, flush=True)
         except Exception as exc:
             print(f"clock: could not read node time ({exc})", file=sys.stderr, flush=True)
 
-        skew = None if node_epoch is None else node_epoch - now
+        skew = None if node_epoch is None else node_epoch - int(time.time())
         if not force and skew is not None and abs(skew) <= self.cfg.mc_clock_max_skew:
-            return False
+            return "ok"
+
+        # Re-read the clock here rather than reusing a value sampled before the
+        # round trip above, which could be seconds stale on a busy serial link.
+        now = int(time.time())
         try:
-            await self.mc.commands.set_time(now)
+            await asyncio.wait_for(self.mc.commands.set_time(now), _CLOCK_CMD_TIMEOUT)
+        except asyncio.TimeoutError:
+            print("clock: timed out setting node time", file=sys.stderr, flush=True)
+            return "failed"
         except Exception as exc:
             print(f"clock: set_time failed ({exc})", file=sys.stderr, flush=True)
-            return False
+            return "failed"
         self.clock_syncs += 1
         self.last_clock_sync = now
         drift = "node time unreadable" if skew is None else f"node was {skew:+d}s off"
-        print(f"clock: set MeshCore node to {now} ({drift})", flush=True)
-        return True
+        print(f"clock: set MeshCore node to {now} ({drift}; host {why})", flush=True)
+        return "set"
 
-    async def _clock_sync_loop(self) -> None:
+    def _next_clock_delay(self, result: str) -> float:
+        """How long to wait before looking at the node clock again.
+
+        A healthy check waits the full interval. Anything else — a failed write,
+        or a host clock NTP has not caught up with yet — retries soon and backs
+        off, so we are not stuck an hour behind reality after a power cut.
+        """
+        if result in ("set", "ok"):
+            self._clock_backoff = self.cfg.mc_clock_retry
+            return self.cfg.mc_clock_sync_interval
+        # Never wait longer than the steady-state interval, even if someone
+        # configured clock_retry_seconds larger than clock_sync_interval_seconds.
+        delay = min(self._clock_backoff, self.cfg.mc_clock_sync_interval)
+        self._clock_backoff = min(self._clock_backoff * 2, self.cfg.mc_clock_sync_interval)
+        return delay
+
+    async def _clock_sync_loop(self, first_result: str = "ok") -> None:
         """Re-check the node clock forever. Never let one failure kill the task."""
+        delay = self._next_clock_delay(first_result)
         while True:
-            await asyncio.sleep(self.cfg.mc_clock_sync_interval)
+            await asyncio.sleep(delay)
             try:
-                await self._sync_meshcore_clock()
+                result = await self._sync_meshcore_clock()
             except Exception as exc:
                 print(f"clock: sync loop error ({exc})", file=sys.stderr, flush=True)
+                result = "failed"
+            delay = self._next_clock_delay(result)
 
     async def run(self) -> None:
         self.loop = asyncio.get_running_loop()
@@ -244,10 +396,11 @@ class Bridge:
         if self.cfg.mc_clock_sync:
             # force=True: on connect we may well have just power-cycled the node,
             # so set the clock regardless of what it claims.
-            await self._sync_meshcore_clock(force=True)
+            first = await self._sync_meshcore_clock(force=True)
             # Keep a reference: asyncio only holds a weak one, so a bare
-            # create_task() can be garbage-collected mid-flight.
-            self._clock_task = asyncio.create_task(self._clock_sync_loop())
+            # create_task() can be garbage-collected mid-flight. The first result
+            # is handed on so a failed startup sync retries in seconds, not hours.
+            self._clock_task = asyncio.create_task(self._clock_sync_loop(first))
         print("bridge up:", self.cfg.direction, flush=True)
         # Keep the asyncio loop alive; both sides feed callbacks/tasks into it.
         while True:

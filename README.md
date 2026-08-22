@@ -118,7 +118,12 @@ names are stable, so a reboot can't swap which radio is which.
 # /etc/systemd/system/mesh-bridge.service
 [Unit]
 Description=MeshCore <-> Meshtastic bridge
-After=network.target
+# time-sync.target matters: the bridge writes the Pi's clock onto the MeshCore
+# node, and a Pi has no RTC. Starting before NTP has stepped the clock would
+# push a stale boot time onto the node. The bridge guards against this itself,
+# but ordering here means it does not have to wait and retry.
+After=network-online.target time-sync.target
+Wants=network-online.target
 
 [Service]
 WorkingDirectory=/home/pi/MeshCore-Meshtastic-RaspberryPi-Bridge
