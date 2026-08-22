@@ -4,6 +4,13 @@
 port = "/dev/serial/by-id/usb-Seeed_Wio_Tracker_L1-if00"  # your MeshCore companion node
 baud = 115200
 channel = 0            # channel index to bridge (0 = the public channel)
+# nRF52 MeshCore nodes have no battery-backed RTC: radio settings survive a power
+# cycle but the clock does not — it reverts to the firmware build date. The Pi
+# knows the real time, so the bridge pushes it on connect and re-checks on the
+# interval below. Leave this on unless something else already sets the clock.
+clock_sync = true
+clock_sync_interval_seconds = 3600   # how often to re-check the node's clock
+clock_max_skew_seconds = 30          # only rewrite the clock if drift exceeds this
 
 [meshtastic]
 port = "/dev/serial/by-id/usb-...Meshtastic..."           # your Meshtastic node

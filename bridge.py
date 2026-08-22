@@ -21,6 +21,12 @@ Every relayed message is tagged (config `*_prefix`) so readers know it crossed
 from the other network, and a short-window dedup table prevents echo loops (a
 message we just injected coming back and being relayed again).
 
+The bridge also disciplines the MeshCore node's clock. nRF52 nodes have no
+battery-backed RTC, so every power cycle resets the node's clock to its build
+date while radio settings survive — which would silently corrupt the timestamps
+the pilot is collecting. The Pi knows the real time, so it pushes it on connect
+and re-checks on an interval (`[meshcore] clock_sync*`).
+
 STATUS: scaffold. The structure and the loop-prevention logic are here; the two
 `# TODO(hardware)` spots need a real MeshCore node and a real Meshtastic node on
 the same Pi to finish and verify (the exact event/packet field names differ by
@@ -56,6 +62,9 @@ class Config:
     require_direct: bool
     authorized_mc_keys: set
     authorized_mt_ids: set
+    mc_clock_sync: bool = True
+    mc_clock_sync_interval: float = 3600.0
+    mc_clock_max_skew: float = 30.0
 
     @classmethod
     def load(cls, path: str) -> "Config":
@@ -73,6 +82,9 @@ class Config:
             require_direct=c.get("commands", {}).get("require_direct_message", True),
             authorized_mc_keys={k.lower() for k in c.get("commands", {}).get("authorized_meshcore_keys", [])},
             authorized_mt_ids={str(i) for i in c.get("commands", {}).get("authorized_meshtastic_ids", [])},
+            mc_clock_sync=bool(c["meshcore"].get("clock_sync", True)),
+            mc_clock_sync_interval=float(c["meshcore"].get("clock_sync_interval_seconds", 3600)),
+            mc_clock_max_skew=float(c["meshcore"].get("clock_max_skew_seconds", 30)),
         )
 
     @property
@@ -108,6 +120,9 @@ class Bridge:
         self.mt = None   # meshtastic interface
         self.loop: asyncio.AbstractEventLoop | None = None
         self.started_at = time.monotonic()
+        self.clock_syncs = 0                       # how many times we set the node clock
+        self.last_clock_sync: float | None = None  # unix epoch of the last successful set
+        self._clock_task: asyncio.Task | None = None  # held so the loop is not GC'd
 
     # ---- Command interface (bridge is queryable from either mesh) ----
 
@@ -153,10 +168,86 @@ class Bridge:
                     f"MeshCore ch{self.cfg.mc_channel} · Meshtastic ch{self.cfg.mt_channel}")
         return f"unknown command '{cmd}' — try: {self.cfg.command_prefix} help"
 
+    # ---- MeshCore clock discipline ----
+    #
+    # nRF52 MeshCore nodes (e.g. the Seeed XIAO nRF52840) have no battery-backed
+    # RTC. Radio settings survive a power cycle; the clock does not — it reverts
+    # to the firmware build date. Anything the node timestamps after that is
+    # wrong by years, which for this project means the pilot's own evaluation
+    # data (uptime, traffic, when a repeater was last heard) is quietly bogus.
+    # The Pi is the only thing in the enclosure that knows the real time, so it
+    # pushes it on connect and re-checks on an interval.
+
+    @staticmethod
+    def _epoch_from_event(ev) -> int | None:
+        """Pull a unix epoch out of a meshcore Event, tolerating payload shapes.
+
+        The library wraps replies in an Event whose `payload` is usually a dict;
+        the key name for the device time has moved between versions, so probe
+        the plausible ones rather than pin to one.
+        """
+        payload = getattr(ev, "payload", ev)
+        if isinstance(payload, dict):
+            for key in ("time", "epoch", "curr_time", "timestamp", "secs"):
+                val = payload.get(key)
+                if isinstance(val, (int, float)) and val > 0:
+                    return int(val)
+            return None
+        if isinstance(payload, (int, float)) and payload > 0:
+            return int(payload)
+        return None
+
+    async def _sync_meshcore_clock(self, *, force: bool = False) -> bool:
+        """Push host UTC to the MeshCore node. Returns True if it set the clock.
+
+        Reads the node's clock first so an unnecessary write is skipped (and so
+        the drift gets logged, which is the signal that the node rebooted). If
+        the read fails we still set the clock — a node we cannot read the time
+        from is exactly the case where the time is most likely wrong.
+        """
+        if self.mc is None:
+            return False
+        now = int(time.time())
+        node_epoch = None
+        try:
+            node_epoch = self._epoch_from_event(await self.mc.commands.get_time())
+        except Exception as exc:
+            print(f"clock: could not read node time ({exc})", file=sys.stderr, flush=True)
+
+        skew = None if node_epoch is None else node_epoch - now
+        if not force and skew is not None and abs(skew) <= self.cfg.mc_clock_max_skew:
+            return False
+        try:
+            await self.mc.commands.set_time(now)
+        except Exception as exc:
+            print(f"clock: set_time failed ({exc})", file=sys.stderr, flush=True)
+            return False
+        self.clock_syncs += 1
+        self.last_clock_sync = now
+        drift = "node time unreadable" if skew is None else f"node was {skew:+d}s off"
+        print(f"clock: set MeshCore node to {now} ({drift})", flush=True)
+        return True
+
+    async def _clock_sync_loop(self) -> None:
+        """Re-check the node clock forever. Never let one failure kill the task."""
+        while True:
+            await asyncio.sleep(self.cfg.mc_clock_sync_interval)
+            try:
+                await self._sync_meshcore_clock()
+            except Exception as exc:
+                print(f"clock: sync loop error ({exc})", file=sys.stderr, flush=True)
+
     async def run(self) -> None:
         self.loop = asyncio.get_running_loop()
         await self._connect_meshcore()
         self._connect_meshtastic()
+        if self.cfg.mc_clock_sync:
+            # force=True: on connect we may well have just power-cycled the node,
+            # so set the clock regardless of what it claims.
+            await self._sync_meshcore_clock(force=True)
+            # Keep a reference: asyncio only holds a weak one, so a bare
+            # create_task() can be garbage-collected mid-flight.
+            self._clock_task = asyncio.create_task(self._clock_sync_loop())
         print("bridge up:", self.cfg.direction, flush=True)
         # Keep the asyncio loop alive; both sides feed callbacks/tasks into it.
         while True:
