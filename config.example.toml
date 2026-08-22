@@ -6,11 +6,22 @@ baud = 115200
 channel = 0            # channel index to bridge (0 = the public channel)
 # nRF52 MeshCore nodes have no battery-backed RTC: radio settings survive a power
 # cycle but the clock does not — it reverts to the firmware build date. The Pi
-# knows the real time, so the bridge pushes it on connect and re-checks on the
-# interval below. Leave this on unless something else already sets the clock.
+# pushes the real time on connect and re-checks on the interval below. Leave
+# this on unless something else already sets the clock.
 clock_sync = true
-clock_sync_interval_seconds = 3600   # how often to re-check the node's clock
-clock_max_skew_seconds = 30          # only rewrite the clock if drift exceeds this
+clock_sync_interval_seconds = 3600   # how often to re-check the node's clock (min 60)
+# Drift tolerance for the PERIODIC check. Note the bridge always writes the clock
+# on connect (and so on every service restart), and whenever the node's time
+# cannot be read — raising this will not stop those writes.
+clock_max_skew_seconds = 30
+# How soon to look again after a failed sync, or while waiting for the host's own
+# clock to be NTP-corrected. Doubles up to clock_sync_interval_seconds.
+clock_retry_seconds = 30
+# A Pi has no RTC either: after a power cut it can boot at the epoch or at a
+# stale fake-hwclock value, before NTP has stepped it. With this on, the bridge
+# refuses to write an untrusted host clock onto the node rather than overwrite a
+# possibly-correct one. Only turn it off on a host with no NTP at all.
+require_host_clock_sync = true
 
 [meshtastic]
 port = "/dev/serial/by-id/usb-...Meshtastic..."           # your Meshtastic node
